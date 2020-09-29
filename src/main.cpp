@@ -74,7 +74,7 @@ float collidePredict(float posx, float posy, float theta, vector<vector<float>>&
         float dist = sqrt(dx * dx + dy * dy);
         float delta = atan2(dy, dx) - theta;
         if (cos(delta)<=0.0) continue;
-        float vdist = dist * sin(delta);
+        float vdist = abs(dist * sin(delta));
         if (vdist < obstacle[2]+1 && vdist < obj_dist){
             obj_dist = vdist;
         }
