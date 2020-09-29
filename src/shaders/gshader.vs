@@ -12,7 +12,10 @@ void main()
     if (goalInd == 0){
         ourColor = vec3(1.0, 1.0, 0.0);
     }
-	else{
+	else if (goalInd == 1){
         ourColor = vec3(0.0, 1.0, 1.0);
+    }
+    else{
+        ourColor = vec3(1.0, 0.0, 1.0);
     }
 }

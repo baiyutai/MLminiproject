@@ -68,14 +68,14 @@ bool collideTest(float posx, float posy, vector<vector<float>>& obstacles){
 }
 
 float collidePredict(float posx, float posy, float theta, vector<vector<float>>& obstacles){
-    float obj_dist = -1.0;
+    float obj_dist = 500.0;
     for (auto & obstacle : obstacles){
         float dx = obstacle[0]-posx, dy = obstacle[1] - posy;
         float dist = sqrt(dx * dx + dy * dy);
         float delta = atan2(dy, dx) - theta;
         if (cos(delta)<=0.0) continue;
         float vdist = dist * sin(delta);
-        if (vdist < obstacle[2]+1 && (obj_dist < 0 || vdist < obj_dist)){
+        if (vdist < obstacle[2]+1 && vdist < obj_dist){
             obj_dist = vdist;
         }
     }
@@ -124,12 +124,7 @@ void two_layer_model(VectorXf& param, VectorXf& in_data, VectorXf& out_data, int
 }
 
 
-void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>& actions, vector<vector<float>>& states, float dt, float vmax, float omax, int hidden_size, vector<vector<float>>& obstacles){
-    int steps = actions.size();
-    if (steps != states.size()-1 || steps == 0){
-        cout<<"run_model: actions.size != states.size or =0"<<endl;
-        return;
-    }
+void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>& actions, vector<vector<float>>& states, float dt, float vmax, float omax, int hidden_size, vector<vector<float>>& obstacles, int steps, bool clampFlag = false){
     int in_size = init_state.size();
     VectorXf in_data = VectorXf::Zero(in_size);
     #pragma omp parallel for
@@ -140,9 +135,11 @@ void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>
     states[0] = vector<float>(init_state.begin(), init_state.begin()+4);
     for (int i = 0; i < steps; ++i){
         two_layer_model(param, in_data, out_data, hidden_size);
-        actions[i][0] = clamp(out_data(0), -vmax, vmax); // velocity
-        actions[i][1] = clamp(out_data(1), -omax, omax); // omega
-
+        actions[i][0] = out_data(0);
+        actions[i][1] = out_data(1);
+        // actions[i][0] = clamp(out_data(0), -vmax, vmax); // velocity
+        // actions[i][1] = clamp(out_data(1), -omax, omax); // omega
+        
         // update state
         states[i+1][0] = states[i][0] + actions[i][0]*dt*cos(states[i][2]); // xnew = x + v*dt*cos(theta)
         states[i+1][1] = states[i][1] + actions[i][0]*dt*sin(states[i][2]); // ynew = y + v*dt*cos(theta)
@@ -157,30 +154,22 @@ void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>
 float reward(VectorXf& param, vector<float>& init_state, int steps, float time_total, float vmax, float omax, int hidden_size, vector<vector<float>> & obstacles){
     vector<vector<float>> actions(steps, vector<float>(2, 0));
     vector<vector<float>> states(steps+1, vector<float>(4, 0));
-    run_model(param, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
+    run_model(param, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles, actions.size());
     float reward = 0.0, dist = 0.0;
-    float gamma = 0.9;
-    float gammaC = 1.0;
+    float gamma = 0.9, gammaC = 1.0;
     for (int i = 1; i <= steps; ++i){
         float dx = states[i][0] - init_state[4];
         float dy = states[i][1] - init_state[5];
         dist = sqrt(dx*dx+dy*dy);
-        if (collideTest(states[i][0], states[i][1], obstacles)){
-            reward -= 20000;
-        }
-        reward -= gammaC*dist;
-        reward -= abs(actions[i-1][1])*gammaC;
+        float collide_dist = states[i][3], omega = actions[i-1][1], vel = actions[i-1][0];
+        // reward += gammaC*(100-dist)*100.0;
+        // reward -= abs(actions[i-1][1])*gammaC;
         // float collide_dist = states[i][3];
         // if (collide_dist > 0.0){
         //     reward -= gammaC*10/collide_dist;
         // }
+        reward += gammaC * (10*(100-dist)-omega*omega - vel/collide_dist);
         gammaC *= gamma;
-    }
-    if (dist < 20){
-        reward += 1000;
-    }
-    if (dist < 10 && abs(actions[steps-1][0] < 5)){
-        reward += 10000;
     }
     return reward;
 }
@@ -315,33 +304,49 @@ int main()
     }
     init_state[3] = collidePredict(init_state[0], init_state[1], init_state[2], obstacles);
     int in_size = 6, hidden_size = 7, out_size = 2;
-    float time_total = 1.0;
-    int steps = 500;
+    float time_total = 0.1;
+    int steps = 10.0;
     float vmax = 80.0, omax = 2.0;
     VectorXf mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
     VectorXf th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-    
-    cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
-
     vector<vector<float>> actions(steps, vector<float>(out_size, 0));
     vector<vector<float>> states(steps+1, vector<float>(4, 0));
-    run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
-
-    int frame = 0;
 
     float nextGoalX = 0.0, nextGoalY = 0.0;
-    bool nextGoalFlag = false;
+    bool nextGoalFlag = false, reachGoalFlag = false;
 
     // render loop
     // -----------
     while (!glfwWindowShouldClose(window))
     {
+        processInput(window, nextGoalX, nextGoalY, nextGoalFlag);
+        // computation
+        // -----------
+        if (nextGoalFlag && reachGoalFlag){
+            init_state[4] = nextGoalX;
+            init_state[5] = nextGoalY;
+            nextGoalFlag = false;
+            reachGoalFlag = false;
+            mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
+            th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
+        }
+        if (!reachGoalFlag){
+            cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
+            run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles, 1);
+            for (int i = 0; i < 4; ++i){
+                init_state[i] = states[1][i];
+            }
+            float dx = init_state[0] - init_state[4], dy = init_state[1] - init_state[5];
+            if (sqrt(dx*dx+dy*dy)<2.0){
+                reachGoalFlag = true;
+            }
+        }
+
         // render
         // ------
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         glBindVertexArray(VAO);
-
         // draw current goal
         goalShader.use();
         glm::mat4 transform = glm::mat4(1.0f);
@@ -350,66 +355,33 @@ int main()
         goalShader.setMat4("transform", transform);
         goalShader.setInt("goalInd", 0);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-
         // draw obstacles
         for (auto & obstacle:obstacles){
             drawCircle(obstacle[0]/SCENE_SHRINK, obstacle[1]/SCENE_SHRINK, obstacle[2]/SCENE_SHRINK, 10, goalShader);
-            // transform = glm::mat4(1.0f);
-            // transform = glm::translate(transform, glm::vec3(obstacle[0]/SCENE_SHRINK, obstacle[1]/SCENE_SHRINK, 0.0f));
-            // transform = glm::scale(transform, glm::vec3(obstacle[2]/SCENE_SHRINK, obstacle[2]/SCENE_SHRINK, 1.0));
-            // goalShader.setMat4("transform", transform);
-            // goalShader.setInt("goalInd", 1);
-            // glDrawArrays(GL_TRIANGLES, 0, 3);
         }
-
-        transform = glm::mat4(1.0f); // make sure to initialize matrix to identity matrix first
-        // first container
-        // ---------------
-        transform = glm::translate(transform, glm::vec3(states[frame][0]/SCENE_SHRINK, states[frame][1]/SCENE_SHRINK, 0.0f));
-        transform = glm::rotate(transform, states[frame][2], glm::vec3(0.0f, 0.0f, 1.0f));
+        // draw agent
+        transform = glm::mat4(1.0f);
+        transform = glm::translate(transform, glm::vec3(init_state[0]/SCENE_SHRINK, init_state[1]/SCENE_SHRINK, 0.0f));
+        transform = glm::rotate(transform, init_state[2], glm::vec3(0.0f, 0.0f, 1.0f));
         transform = glm::scale(transform, glm::vec3(1.0/SCENE_SHRINK, 1.0/SCENE_SHRINK, 1.0));
-        // get their uniform location and set matrix (using glm::value_ptr)
         ourShader.use();
         ourShader.setMat4("transform", transform);
-
-        // with the uniform matrix set, draw the first container
-        
         glDrawArrays(GL_TRIANGLES, 0, 3);
-
-
+        // draw next goal
+        if (nextGoalFlag){
+            transform = glm::mat4(1.0f);
+            transform = glm::translate(transform, glm::vec3(nextGoalX/SCENE_SHRINK, nextGoalY/SCENE_SHRINK, 0.0f));
+            transform = scale(transform, glm::vec3(1.0/SCENE_SHRINK, 1.0/SCENE_SHRINK, 1.0));
+            goalShader.use();
+            goalShader.setMat4("transform", transform);
+            goalShader.setInt("goalInd", 2);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
 
         // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
         // -------------------------------------------------------------------------------
         glfwSwapBuffers(window);
         glfwPollEvents();
-
-        frame++;
-        processInput(window, nextGoalX, nextGoalY, nextGoalFlag);
-        if (nextGoalFlag){
-            for (int i = 0; i < 4; ++i){
-                init_state[i] = states[frame-1][i];
-            }
-            init_state[4] = nextGoalX;
-            init_state[5] = nextGoalY;
-            mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-            th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-            cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
-            run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
-            frame = 0;
-            nextGoalFlag = false;
-            continue;
-        }
-        if (frame == states.size()){
-            for (int i = 0; i < 4; ++i){
-                init_state[i] = states[frame-1][i];
-            }
-            // mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-            // th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-            cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
-            run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
-            frame = 0;
-            // frame--;
-        }
     }
 
     // optional: de-allocate all resources once they've outlived their purpose:
