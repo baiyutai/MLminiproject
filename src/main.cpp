@@ -143,14 +143,25 @@ void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>
     states[0] = vector<float>(init_state.begin(), init_state.begin()+4);
     for (int i = 0; i < steps; ++i){
         two_layer_model(param, in_data, out_data, hidden_size);
-        actions[i][0] = clamp(out_data(0), -vmax, vmax); // velocity
-        actions[i][1] = clamp(out_data(1), -omax, omax); // omega
+        if (clampFlag){
+            actions[i][0] = clamp(out_data(0), -vmax, vmax); // velocity
+            actions[i][1] = clamp(out_data(1), -omax, omax); // omega
+        }
+        else{
+            actions[i][0] = out_data(0);
+            actions[i][1] = out_data(1);
+        }
         
         // update state
         states[i+1][0] = states[i][0] + actions[i][0]*dt*cos(states[i][2]); // xnew = x + v*dt*cos(theta)
         states[i+1][1] = states[i][1] + actions[i][0]*dt*sin(states[i][2]); // ynew = y + v*dt*cos(theta)
         states[i+1][2] = states[i][2] + actions[i][1]*dt; // anglenew = angle + omega*dt
-        states[i+1][3] = collidePredict(states[i+1][0], states[i+1][1], states[i+1][2], obstacles);
+        if (collideTest(states[i+1][0], states[i+1][1], obstacles))
+            states[i+1][3] = 2.0;
+        else if (collidePredict(states[i+1][0], states[i+1][1], states[i+1][2], obstacles) < 20.0)
+            states[i+1][3] = 1.0;
+        else
+            states[i+1][3] = 0.0;
         for (int j = 0; j < 4; ++j){
             in_data(j) = states[i+1][j];
         }
@@ -168,7 +179,7 @@ float reward(VectorXf& param, vector<float>& init_state, int steps, float time_t
         float dy = states[i][1] - init_state[5];
         dist = sqrt(dx*dx+dy*dy);
         float collide_dist = states[i][3], omega = actions[i-1][1], vel = actions[i-1][0];
-        reward += gammaC * (1/(dist+0.1)-omega*omega - vel/collide_dist);
+        reward += gammaC * (100/(dist+0.1) - omega*omega - vel*vel/collide_dist);
         gammaC *= gamma;
     }
     return reward;
@@ -302,7 +313,12 @@ int main()
         init_state[0] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
         init_state[1] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
     }
-    init_state[3] = collidePredict(init_state[0], init_state[1], init_state[2], obstacles);
+    if (collideTest(init_state[0], init_state[1], obstacles))
+        init_state[3] = 2.0;
+    else if (collidePredict(init_state[0], init_state[1], init_state[2], obstacles) < 20.0)
+        init_state[3] = 1.0;
+    else
+        init_state[3] = 0.0;
     int in_size = 6, hidden_size = 7, out_size = 2;
     float time_total = 0.1;
     int steps = 10.0;
@@ -332,7 +348,7 @@ int main()
         }
         if (!reachGoalFlag){
             cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
-            run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles, 1);
+            run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles, 1, true);
             for (int i = 0; i < 4; ++i){
                 init_state[i] = states[1][i];
             }
