@@ -57,6 +57,7 @@ void drawCircle(float posx, float posy, float radius, int dim, Shader goalShader
 }
 
 bool collideTest(float posx, float posy, vector<vector<float>>& obstacles){
+    if (abs(posx)>SCENE_SHRINK || abs(posy)>SCENE_SHRINK) return true;
     for (auto & obstacle : obstacles){
         float dx = obstacle[0]-posx, dy = obstacle[1] - posy;
         float dist = dx * dx + dy * dy;
@@ -68,15 +69,22 @@ bool collideTest(float posx, float posy, vector<vector<float>>& obstacles){
 }
 
 float collidePredict(float posx, float posy, float theta, vector<vector<float>>& obstacles){
-    float obj_dist = -1.0;
+    float obj_dist = 10000.0;
+    if (cos(theta)==0.0){
+        obj_dist = (sin(theta)>0.0) ? SCENE_SHRINK-posy:posy-SCENE_SHRINK;
+    }
+    else{
+        obj_dist = (cos(theta)>0.0) ? (SCENE_SHRINK-posx)/abs(tan(theta)):(posx-SCENE_SHRINK)/abs(tan(theta));
+    }
+    obj_dist = clamp(obj_dist, 0.1, obj_dist);
     for (auto & obstacle : obstacles){
         float dx = obstacle[0]-posx, dy = obstacle[1] - posy;
         float dist = sqrt(dx * dx + dy * dy);
         float delta = atan2(dy, dx) - theta;
         if (cos(delta)<=0.0) continue;
-        float vdist = dist * sin(delta);
-        if (vdist < obstacle[2]+1 && (obj_dist < 0 || vdist < obj_dist)){
-            obj_dist = vdist;
+        float vdist = abs(dist * sin(delta));
+        if (vdist < obstacle[2]+1){
+            obj_dist = clamp(dist*cos(delta)-sqrt((obstacle[2]+1)*(obstacle[2]+1)-vdist*vdist), 0.1, obj_dist);
         }
     }
     return obj_dist;
@@ -159,29 +167,33 @@ float reward(VectorXf& param, vector<float>& init_state, int steps, float time_t
     vector<vector<float>> states(steps+1, vector<float>(4, 0));
     run_model(param, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
     float reward = 0.0, dist = 0.0;
-    float gamma = 0.9;
+    float gamma = 1.0;
     float gammaC = 1.0;
     for (int i = 1; i <= steps; ++i){
         float dx = states[i][0] - init_state[4];
         float dy = states[i][1] - init_state[5];
         dist = sqrt(dx*dx+dy*dy);
+        reward += gammaC * (100*(100-dist)-actions[i-1][1]*actions[i-1][1]-actions[i-1][0]*actions[i-1][0]/(states[i][3]+100.0));
         if (collideTest(states[i][0], states[i][1], obstacles)){
-            reward -= 20000;
+            reward -= 10000;
         }
-        reward -= gammaC*dist;
-        reward -= abs(actions[i-1][1])*gammaC;
-        // float collide_dist = states[i][3];
-        // if (collide_dist > 0.0){
-        //     reward -= gammaC*10/collide_dist;
+        // if (collideTest(states[i][0], states[i][1], obstacles)){
+        //     reward -= 20000;
         // }
+        // reward -= gammaC*dist;
+        // reward -= abs(actions[i-1][1])*gammaC;
+        // // float collide_dist = states[i][3];
+        // // if (collide_dist > 0.0){
+        // //     reward -= gammaC*10/collide_dist;
+        // // }
         gammaC *= gamma;
     }
-    if (dist < 20){
-        reward += 1000;
-    }
-    if (dist < 10 && abs(actions[steps-1][0] < 5)){
-        reward += 10000;
-    }
+    // if (dist < 20){
+    //     reward += 1000;
+    // }
+    // if (dist < 10 && abs(actions[steps-1][0] < 5)){
+    //     reward += 10000;
+    // }
     return reward;
 }
 
@@ -315,8 +327,8 @@ int main()
     }
     init_state[3] = collidePredict(init_state[0], init_state[1], init_state[2], obstacles);
     int in_size = 6, hidden_size = 7, out_size = 2;
-    float time_total = 1.0;
-    int steps = 500;
+    float time_total = 2.0;
+    int steps = 1000;
     float vmax = 80.0, omax = 2.0;
     VectorXf mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
     VectorXf th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
