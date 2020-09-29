@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build",
+            "type": "shell",
+            "command": "g++",
+            "args": [
+                "-g",
+                "-std=c++17",
+                "-I./include",
+                "-L./lib",
+                "src/main.cpp",
+                "-lglad",
+                "-lglfw3dll",
+                "-lglfw3",
+                "-o",
+                "${fileDirname}\\main.exe",
+                    ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher":[
+                "$gcc"
+            ]           
+        }
+    ]
+}
