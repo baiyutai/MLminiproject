@@ -56,38 +56,10 @@ void drawCircle(float posx, float posy, float radius, int dim, Shader goalShader
     }
 }
 
-bool collideTest(float posx, float posy, vector<vector<float>>& obstacles){
-    if (abs(posx)>SCENE_SHRINK || abs(posy)>SCENE_SHRINK) return true;
-    for (auto & obstacle : obstacles){
-        float dx = obstacle[0]-posx, dy = obstacle[1] - posy;
-        float dist = dx * dx + dy * dy;
-        if (sqrt(dist) < obstacle[2]+1){
-            return true;
-        }
-    }
-    return false;
-}
-
-float collidePredict(float posx, float posy, float theta, vector<vector<float>>& obstacles){
-    float obj_dist = 10000.0;
-    if (cos(theta)==0.0){
-        obj_dist = (sin(theta)>0.0) ? SCENE_SHRINK-posy:posy-SCENE_SHRINK;
-    }
-    else{
-        obj_dist = (cos(theta)>0.0) ? (SCENE_SHRINK-posx)/abs(tan(theta)):(posx-SCENE_SHRINK)/abs(tan(theta));
-    }
-    obj_dist = clamp(obj_dist, 0.1, obj_dist);
-    for (auto & obstacle : obstacles){
-        float dx = obstacle[0]-posx, dy = obstacle[1] - posy;
-        float dist = sqrt(dx * dx + dy * dy);
-        float delta = atan2(dy, dx) - theta;
-        if (cos(delta)<=0.0) continue;
-        float vdist = abs(dist * sin(delta));
-        if (vdist < obstacle[2]+1){
-            obj_dist = clamp(dist*cos(delta)-sqrt((obstacle[2]+1)*(obstacle[2]+1)-vdist*vdist), 0.1, obj_dist);
-        }
-    }
-    return obj_dist;
+bool collideTest(float x1, float y1, float r1, float x2, float y2, float r2){
+    float dx = x1-x2, dy = y1-y2;
+    float dist = dx * dx + dy * dy;
+    return (sqrt(dist) < r1+r2);
 }
 
 // process all input: query GLFW whether relevant keys are pressed/released this frame and react accordingly
@@ -131,8 +103,7 @@ void two_layer_model(VectorXf& param, VectorXf& in_data, VectorXf& out_data, int
     out_data = w2 * hidden_layer + b2;
 }
 
-
-void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>& actions, vector<vector<float>>& states, float dt, float vmax, float omax, int hidden_size, vector<vector<float>>& obstacles){
+void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>& actions, vector<vector<float>>& states, float dt, float vmax, float omax, int hidden_size){
     int steps = actions.size();
     if (steps != states.size()-1 || steps == 0){
         cout<<"run_model: actions.size != states.size or =0"<<endl;
@@ -145,7 +116,7 @@ void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>
         in_data(i) = init_state[i];
     int out_size = actions[0].size();
     VectorXf out_data = VectorXf::Zero(out_size);
-    states[0] = vector<float>(init_state.begin(), init_state.begin()+4);
+    states[0] = vector<float>(init_state.begin(), init_state.begin()+3);
     for (int i = 0; i < steps; ++i){
         two_layer_model(param, in_data, out_data, hidden_size);
         actions[i][0] = clamp(out_data(0), -vmax, vmax); // velocity
@@ -155,55 +126,41 @@ void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>
         states[i+1][0] = states[i][0] + actions[i][0]*dt*cos(states[i][2]); // xnew = x + v*dt*cos(theta)
         states[i+1][1] = states[i][1] + actions[i][0]*dt*sin(states[i][2]); // ynew = y + v*dt*cos(theta)
         states[i+1][2] = states[i][2] + actions[i][1]*dt; // anglenew = angle + omega*dt
-        states[i+1][3] = collidePredict(states[i+1][0], states[i+1][1], states[i+1][2], obstacles);
-        for (int j = 0; j < 4; ++j){
+        #pragma omp parallel for
+        for (int j = 0; j < 3; ++j){
             in_data(j) = states[i+1][j];
         }
     }
 }
 
-float reward(VectorXf& param, vector<float>& init_state, int steps, float time_total, float vmax, float omax, int hidden_size, vector<vector<float>> & obstacles){
+float reward(VectorXf& param, vector<float>& init_state, int steps, float time_total, float vmax, float omax, int hidden_size){
     vector<vector<float>> actions(steps, vector<float>(2, 0));
     vector<vector<float>> states(steps+1, vector<float>(4, 0));
-    run_model(param, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
+    run_model(param, init_state, actions, states, time_total/steps, vmax, omax, hidden_size);
     float reward = 0.0, dist = 0.0;
-    float gamma = 1.0;
-    float gammaC = 1.0;
     for (int i = 1; i <= steps; ++i){
-        float dx = states[i][0] - init_state[4];
-        float dy = states[i][1] - init_state[5];
+        float dx = states[i][0] - init_state[3];
+        float dy = states[i][1] - init_state[4];
         dist = sqrt(dx*dx+dy*dy);
-        reward += gammaC * (100*(100-dist)-actions[i-1][1]*actions[i-1][1]-actions[i-1][0]*actions[i-1][0]/(states[i][3]+100.0));
-        if (collideTest(states[i][0], states[i][1], obstacles)){
+        reward -= (dist+powf(actions[i-1][1], 2));
+        if (collideTest(states[i][0], states[i][1], 1, init_state[5], init_state[6], init_state[7])){
             reward -= 10000;
         }
-        // if (collideTest(states[i][0], states[i][1], obstacles)){
-        //     reward -= 20000;
-        // }
-        // reward -= gammaC*dist;
-        // reward -= abs(actions[i-1][1])*gammaC;
-        // // float collide_dist = states[i][3];
-        // // if (collide_dist > 0.0){
-        // //     reward -= gammaC*10/collide_dist;
-        // // }
-        gammaC *= gamma;
     }
-    // if (dist < 20){
-    //     reward += 1000;
-    // }
-    // if (dist < 10 && abs(actions[steps-1][0] < 5)){
-    //     reward += 10000;
-    // }
+    if (dist < 20){
+        reward += 1000;
+    }
+    if (dist < 10 && abs(actions[steps-1][0] < 5)){
+        reward += 10000;
+    }
     return reward;
 }
 
-
-void cem(VectorXf& mu, VectorXf& th, vector<float>& init_state, int steps, float time_total, float vmax, float omax, int hidden_size, vector<vector<float>>& obstacles){
-    int batch_size = 50;
+void cem(VectorXf& mu, VectorXf& th, vector<float>& init_state, int steps, float time_total, float vmax, float omax, int hidden_size){
+    int batch_size = 100;
     int iterations = 100;
-    float elite_frac = 0.5;
-    float init_std = 1.0;
-    float noise_factor = 1.0;
+    float elite_frac = 0.2;
+    float noise_factor = 2.0;
 
     int elite_n = elite_frac * batch_size;
 
@@ -221,7 +178,7 @@ void cem(VectorXf& mu, VectorXf& th, vector<float>& init_state, int steps, float
                 param(k) = clamp(distribution(generator), mu(k)-3*th(k), mu(k)+3*th(k));
             }
             params.block(0, j, p_size, 1) = param;
-            score[j] = reward(param, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
+            score[j] = reward(param, init_state, steps, time_total, vmax, omax, hidden_size);
         }
         // sort
         vector<int> indices(batch_size);
@@ -237,15 +194,14 @@ void cem(VectorXf& mu, VectorXf& th, vector<float>& init_state, int steps, float
         # pragma omp parallel for
         for (int j = 0; j < p_size; ++j){
             th(j) = (paramsCur.block(j, 0, 1, elite_n) - mu(j) * RowVectorXf::Ones(elite_n)).array().square().sum()/(elite_n - 1);
-            th(j) = sqrt(th(j));
+            th(j) = sqrt(th(j)) + noise_factor/(i+1);
         }
-        th = th + VectorXf::Ones(p_size)*(noise_factor/(i+1));
         float reward = 0.0;
         # pragma omp parallel for
         for (int j = 0; j < elite_n; ++j){
             reward += score[indices[j]]/elite_n;
         }
-        if (i%50 == 0){
+        if (i%5 == 0){
             cout<<"iter:"<<i<<"; reward_mean:"<<reward<<"; mu_mean:"<<mu.mean()<<"; th_mean:"<<th.mean()<<endl;
         }
     }
@@ -310,34 +266,33 @@ int main()
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
-    // generate random obstacles
-    int obs_num = 5;
-    vector<vector<float>> obstacles(obs_num, vector<float>(3));
-    #pragma omp parallel for
-    for (auto & obstacle: obstacles){
-        obstacle[0] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
-        obstacle[1] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
-        obstacle[2] = getRand(5, 10);
-    }
-
-    vector<float> init_state = {-50, 0, 0.01, 0.0, 50.0, 0.0};
-    while (collideTest(init_state[0], init_state[1], obstacles)){
+    // generate random initial states
+    vector<float> init_state = {-50.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 10.0};
+    init_state[5] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+    init_state[6] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+    init_state[7] = getRand(5, 10);
+    while (true){
         init_state[0] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
         init_state[1] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+        if (!collideTest(init_state[0], init_state[1], 1, init_state[5], init_state[6], init_state[7])) break;
     }
-    init_state[3] = collidePredict(init_state[0], init_state[1], init_state[2], obstacles);
-    int in_size = 6, hidden_size = 7, out_size = 2;
-    float time_total = 2.0;
+    while (true){
+        init_state[4] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+        init_state[5] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+        if (!collideTest(init_state[4], init_state[5], 1, init_state[5], init_state[6], init_state[7])) break;
+    }
+    int in_size = 8, hidden_size = 10, out_size = 2;
+    float time_total = 4.0;
     int steps = 1000;
     float vmax = 80.0, omax = 2.0;
     VectorXf mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
     VectorXf th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
     
-    cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
+    cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size);
 
     vector<vector<float>> actions(steps, vector<float>(out_size, 0));
     vector<vector<float>> states(steps+1, vector<float>(4, 0));
-    run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
+    run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size);
 
     int frame = 0;
 
@@ -348,80 +303,65 @@ int main()
     // -----------
     while (!glfwWindowShouldClose(window))
     {
+        // processInput
+        // ------------
+        processInput(window, nextGoalX, nextGoalY, nextGoalFlag);
+
+        // computation
+        // -----------
+        if (nextGoalFlag && frame == steps+1){
+            for (int i = 0; i < 4; ++i){
+                init_state[i] = states[frame-1][i];
+            }
+            init_state[3] = nextGoalX;
+            init_state[4] = nextGoalY;
+            mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
+            th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
+            cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size);
+            run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size);
+            frame = 0;
+            nextGoalFlag = false;
+        }
+        frame = (frame == steps) ? frame:frame+1;
+
         // render
         // ------
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         glBindVertexArray(VAO);
-
         // draw current goal
         goalShader.use();
         glm::mat4 transform = glm::mat4(1.0f);
-        transform = glm::translate(transform, glm::vec3(init_state[4]/SCENE_SHRINK, init_state[5]/SCENE_SHRINK, 0.0f));
+        transform = glm::translate(transform, glm::vec3(init_state[3]/SCENE_SHRINK, init_state[4]/SCENE_SHRINK, 0.0f));
         transform = glm::scale(transform, glm::vec3(1.0/SCENE_SHRINK, 1.0/SCENE_SHRINK, 1.0));
         goalShader.setMat4("transform", transform);
         goalShader.setInt("goalInd", 0);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-
-        // draw obstacles
-        for (auto & obstacle:obstacles){
-            drawCircle(obstacle[0]/SCENE_SHRINK, obstacle[1]/SCENE_SHRINK, obstacle[2]/SCENE_SHRINK, 10, goalShader);
-            // transform = glm::mat4(1.0f);
-            // transform = glm::translate(transform, glm::vec3(obstacle[0]/SCENE_SHRINK, obstacle[1]/SCENE_SHRINK, 0.0f));
-            // transform = glm::scale(transform, glm::vec3(obstacle[2]/SCENE_SHRINK, obstacle[2]/SCENE_SHRINK, 1.0));
-            // goalShader.setMat4("transform", transform);
-            // goalShader.setInt("goalInd", 1);
-            // glDrawArrays(GL_TRIANGLES, 0, 3);
+        // draw next goal
+        if (nextGoalFlag){
+            transform = glm::mat4(1.0f);
+            transform = glm::translate(transform, glm::vec3(nextGoalX/SCENE_SHRINK, nextGoalY/SCENE_SHRINK, 0.0f));
+            transform = glm::scale(transform, glm::vec3(1.0/SCENE_SHRINK, 1.0/SCENE_SHRINK, 1.0));
+            goalShader.setMat4("transform", transform);
+            goalShader.setInt("goalInd", 2);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
         }
-
-        transform = glm::mat4(1.0f); // make sure to initialize matrix to identity matrix first
-        // first container
-        // ---------------
+        // draw obstacle
+        drawCircle(init_state[5]/SCENE_SHRINK, init_state[6]/SCENE_SHRINK, init_state[7]/SCENE_SHRINK, 10, goalShader);
+        // draw agent
+        transform = glm::mat4(1.0f);
         transform = glm::translate(transform, glm::vec3(states[frame][0]/SCENE_SHRINK, states[frame][1]/SCENE_SHRINK, 0.0f));
         transform = glm::rotate(transform, states[frame][2], glm::vec3(0.0f, 0.0f, 1.0f));
         transform = glm::scale(transform, glm::vec3(1.0/SCENE_SHRINK, 1.0/SCENE_SHRINK, 1.0));
-        // get their uniform location and set matrix (using glm::value_ptr)
         ourShader.use();
         ourShader.setMat4("transform", transform);
-
-        // with the uniform matrix set, draw the first container
-        
         glDrawArrays(GL_TRIANGLES, 0, 3);
-
-
 
         // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
         // -------------------------------------------------------------------------------
+        if (nextGoalFlag && frame == steps) frame++;
         glfwSwapBuffers(window);
         glfwPollEvents();
-
-        frame++;
-        processInput(window, nextGoalX, nextGoalY, nextGoalFlag);
-        if (nextGoalFlag){
-            for (int i = 0; i < 4; ++i){
-                init_state[i] = states[frame-1][i];
-            }
-            init_state[4] = nextGoalX;
-            init_state[5] = nextGoalY;
-            mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-            th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-            cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
-            run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
-            frame = 0;
-            nextGoalFlag = false;
-            continue;
-        }
-        if (frame == states.size()){
-            for (int i = 0; i < 4; ++i){
-                init_state[i] = states[frame-1][i];
-            }
-            // mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-            // th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
-            cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size, obstacles);
-            run_model(mu, init_state, actions, states, time_total/steps, vmax, omax, hidden_size, obstacles);
-            frame = 0;
-            // frame--;
-        }
     }
 
     // optional: de-allocate all resources once they've outlived their purpose:
