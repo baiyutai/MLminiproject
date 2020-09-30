@@ -92,7 +92,6 @@ void two_layer_model(VectorXf& param, VectorXf& in_data, VectorXf& out_data, int
     Map<MatrixXf> w1(&param(0), hidden_size, in_size);
     Map<VectorXf> b1(&param(w1.size()), hidden_size);
     VectorXf hidden_layer = w1 * in_data + b1;
-    # pragma omp parallel for
     for (int i = 0; i < hidden_layer.size(); ++i){
         hidden_layer(i) = (hidden_layer(i) >= 0) ? hidden_layer(i) : 0.1*hidden_layer(i); // leaky relu
     }
@@ -111,7 +110,6 @@ void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>
     }
     int in_size = init_state.size();
     VectorXf in_data = VectorXf::Zero(in_size);
-    #pragma omp parallel for
     for (int i = 0; i < in_size; ++i)
         in_data(i) = init_state[i];
     int out_size = actions[0].size();
@@ -126,7 +124,6 @@ void run_model(VectorXf& param, vector<float>& init_state, vector<vector<float>>
         states[i+1][0] = states[i][0] + actions[i][0]*dt*cos(states[i][2]); // xnew = x + v*dt*cos(theta)
         states[i+1][1] = states[i][1] + actions[i][0]*dt*sin(states[i][2]); // ynew = y + v*dt*cos(theta)
         states[i+1][2] = states[i][2] + actions[i][1]*dt; // anglenew = angle + omega*dt
-        #pragma omp parallel for
         for (int j = 0; j < 3; ++j){
             in_data(j) = states[i+1][j];
         }
@@ -137,42 +134,42 @@ float reward(VectorXf& param, vector<float>& init_state, int steps, float time_t
     vector<vector<float>> actions(steps, vector<float>(2, 0));
     vector<vector<float>> states(steps+1, vector<float>(4, 0));
     run_model(param, init_state, actions, states, time_total/steps, vmax, omax, hidden_size);
-    float reward = 0.0, dist = 0.0;
+    float reward = 0.0, final_dist = 0.0;
     for (int i = 1; i <= steps; ++i){
         float dx = states[i][0] - init_state[3];
         float dy = states[i][1] - init_state[4];
-        dist = sqrt(dx*dx+dy*dy);
+        float dist = sqrt(dx*dx+dy*dy);
         reward -= (dist+powf(actions[i-1][1], 2));
         if (collideTest(states[i][0], states[i][1], 1, init_state[5], init_state[6], init_state[7])){
             reward -= 10000;
         }
+        if (i == steps) final_dist = dist;
     }
-    if (dist < 20){
+    if (final_dist < 20){
         reward += 1000;
     }
-    if (dist < 10 && abs(actions[steps-1][0] < 5)){
+    if (final_dist < 10 && abs(actions[steps-1][0] < 5)){
         reward += 10000;
     }
     return reward;
 }
 
 void cem(VectorXf& mu, VectorXf& th, vector<float>& init_state, int steps, float time_total, float vmax, float omax, int hidden_size){
-    int batch_size = 100;
-    int iterations = 100;
-    float elite_frac = 0.2;
-    float noise_factor = 2.0;
+    int batch_size = 50;
+    int iterations = 150;
+    float elite_frac = 0.5;
+    float noise_factor = 8.0;
 
     int elite_n = elite_frac * batch_size;
 
     int p_size = mu.size();
-    VectorXf param = VectorXf::Zero(p_size);
     std::default_random_engine generator;
     for (int i = 0; i < iterations; ++i){
         MatrixXf params(p_size, batch_size);
         vector<float> score(batch_size);
         # pragma omp parallel for
         for (int j = 0; j < batch_size; ++j){
-            # pragma omp parallel for
+            VectorXf param = VectorXf::Zero(p_size);
             for (int k = 0; k < p_size; ++k){
                 normal_distribution<float> distribution(mu(k), th(k));
                 param(k) = clamp(distribution(generator), mu(k)-3*th(k), mu(k)+3*th(k));
@@ -186,9 +183,11 @@ void cem(VectorXf& mu, VectorXf& th, vector<float>& init_state, int steps, float
         stable_sort(indices.begin(), indices.end(), [&score](int i1, int i2){return score[i1]>score[i2];});
         // recompute mu and theta
         MatrixXf paramsCur(p_size, elite_n);
+        float reward = 0.0;
         # pragma omp parallel for
         for (int j = 0; j < elite_n; ++j){
             paramsCur.block(0, j, p_size, 1) = params.block(0, indices[j], p_size, 1);
+            reward += score[indices[j]]/elite_n;
         }
         mu = paramsCur.rowwise().mean();
         # pragma omp parallel for
@@ -196,14 +195,9 @@ void cem(VectorXf& mu, VectorXf& th, vector<float>& init_state, int steps, float
             th(j) = (paramsCur.block(j, 0, 1, elite_n) - mu(j) * RowVectorXf::Ones(elite_n)).array().square().sum()/(elite_n - 1);
             th(j) = sqrt(th(j)) + noise_factor/(i+1);
         }
-        float reward = 0.0;
-        # pragma omp parallel for
-        for (int j = 0; j < elite_n; ++j){
-            reward += score[indices[j]]/elite_n;
-        }
-        if (i%5 == 0){
-            cout<<"iter:"<<i<<"; reward_mean:"<<reward<<"; mu_mean:"<<mu.mean()<<"; th_mean:"<<th.mean()<<endl;
-        }
+        // if (i%5 == 0){
+        //     cout<<"iter:"<<i<<"; reward_mean:"<<reward<<"; mu_mean:"<<mu.mean()<<"; th_mean:"<<th.mean()<<endl;
+        // }
     }
 }
 
@@ -268,27 +262,31 @@ int main()
 
     // generate random initial states
     vector<float> init_state = {-50.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 10.0};
-    init_state[5] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
-    init_state[6] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
-    init_state[7] = getRand(5, 10);
-    while (true){
-        init_state[0] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
-        init_state[1] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
-        if (!collideTest(init_state[0], init_state[1], 1, init_state[5], init_state[6], init_state[7])) break;
-    }
-    while (true){
-        init_state[4] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
-        init_state[5] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
-        if (!collideTest(init_state[4], init_state[5], 1, init_state[5], init_state[6], init_state[7])) break;
-    }
-    int in_size = 8, hidden_size = 10, out_size = 2;
+    // init_state[5] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+    // init_state[6] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+    // init_state[7] = getRand(5, 10);
+    // while (true){
+    //     init_state[0] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+    //     init_state[1] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+    //     if (!collideTest(init_state[0], init_state[1], 1, init_state[5], init_state[6], init_state[7])) break;
+    // }
+    // while (true){
+    //     init_state[4] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+    //     init_state[5] = getRand(-(float)SCENE_SHRINK, (float)SCENE_SHRINK);
+    //     if (!collideTest(init_state[4], init_state[5], 1, init_state[5], init_state[6], init_state[7])) break;
+    // }
+    int in_size = 8, hidden_size = 8, out_size = 2;
     float time_total = 4.0;
     int steps = 1000;
     float vmax = 80.0, omax = 2.0;
     VectorXf mu = VectorXf::Zero((in_size+1)*hidden_size+(hidden_size+1)*out_size);
     VectorXf th = VectorXf::Ones((in_size+1)*hidden_size+(hidden_size+1)*out_size);
     
+    clock_t startT, endT;
+    startT = clock();
     cem(mu, th, init_state, steps, time_total, vmax, omax, hidden_size);
+    endT = clock();
+    cout<<"run cem using "<<(double)(endT-startT)/CLOCKS_PER_SEC<<"s"<<endl;
 
     vector<vector<float>> actions(steps, vector<float>(out_size, 0));
     vector<vector<float>> states(steps+1, vector<float>(4, 0));
